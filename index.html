@@ -1,0 +1,599 @@
+<!DOCTYPE html>
+<html lang="pl">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+<title>Bestia Tracker</title>
+<link rel="apple-touch-icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Crect width='100' height='100' fill='%23111110'/%3E%3Ctext x='50' y='68' font-size='60' text-anchor='middle' fill='%23ff5a1f'%3E%F0%9F%94%A5%3C/text%3E%3C/svg%3E" />
+<meta name="apple-mobile-web-app-capable" content="yes" />
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+<meta name="theme-color" content="#111110" />
+<script src="https://unpkg.com/react@18.3.1/umd/react.production.min.js"></script>
+<script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.production.min.js"></script>
+<script src="https://unpkg.com/@babel/standalone@7.29.15/babel.min.js"></script>
+<script src="https://cdn.tailwindcss.com"></script>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Bebas+Neue&family=Inter:wght@400;500;600;700;800&display=swap');
+  body { margin:0; background:#111110; }
+  .display { font-family: 'Bebas Neue', 'Inter', sans-serif; letter-spacing: 0.03em; }
+  .grain { background-image: radial-gradient(circle at 1px 1px, rgba(255,255,255,0.025) 1px, transparent 0); background-size: 18px 18px; }
+  ::-webkit-scrollbar { width: 6px; height: 6px; }
+  ::-webkit-scrollbar-thumb { background: #3a3a37; border-radius: 3px; }
+</style>
+</head>
+<body>
+<div id="root"></div>
+<script type="text/babel" data-presets="react">
+const { useState, useEffect, useMemo } = React;
+
+const PLAN = {
+  1: { label: "CIĘŻKO", sub: "siła", color: "#ff5a1f", restSec: 120, exercises: [
+    { id: "cp", name: "Chest press", sets: 4, reps: "6-8" },
+    { id: "icp", name: "Incline chest press", sets: 3, reps: "8-10" },
+    { id: "lpd", name: "Lat pulldown", sets: 3, reps: "6-8" },
+    { id: "bc", name: "Biceps curl", sets: 3, reps: "10-12", pair: "Triceps pushdown" },
+    { id: "tp", name: "Triceps pushdown", sets: 3, reps: "10-12", pair: "Biceps curl" },
+    { id: "lp", name: "Leg press", sets: 2, reps: "10-12" },
+  ]},
+  2: { label: "ŚREDNIO", sub: "masa", color: "#e0a020", restSec: 90, exercises: [
+    { id: "cp", name: "Chest press", sets: 3, reps: "8-12" },
+    { id: "pd", name: "Pec deck / crossover", sets: 3, reps: "10-12" },
+    { id: "sr", name: "Seated row", sets: 3, reps: "8-12" },
+    { id: "bc", name: "Biceps curl", sets: 4, reps: "10-12", pair: "Triceps pushdown" },
+    { id: "tp", name: "Triceps pushdown", sets: 4, reps: "10-12", pair: "Biceps curl" },
+    { id: "sp", name: "Shoulder press", sets: 2, reps: "10-12" },
+  ]},
+  3: { label: "LEKKO", sub: "pompa", color: "#5fbfb3", restSec: 50, exercises: [
+    { id: "pd", name: "Pec deck / crossover", sets: 4, reps: "15-20" },
+    { id: "cp", name: "Chest press", sets: 3, reps: "15-20" },
+    { id: "lr", name: "Lateral raise", sets: 2, reps: "15-20", pair: "Reverse pec deck" },
+    { id: "rpd", name: "Reverse pec deck", sets: 2, reps: "15-20", pair: "Lateral raise" },
+    { id: "bc", name: "Biceps curl", sets: 4, reps: "15-20", pair: "Triceps extension" },
+    { id: "te", name: "Triceps extension", sets: 4, reps: "15-20", pair: "Biceps curl" },
+  ]},
+};
+
+const EXNAMES = {};
+Object.values(PLAN).forEach(d => d.exercises.forEach(e => EXNAMES[e.id] = e.name));
+
+const STORE_KEY = "bestia-workout-logs";
+function loadLogs() {
+  try { const raw = localStorage.getItem(STORE_KEY); return raw ? JSON.parse(raw) : []; }
+  catch (e) { return []; }
+}
+function saveLogs(logs) {
+  try { localStorage.setItem(STORE_KEY, JSON.stringify(logs)); return true; }
+  catch (e) { return false; }
+}
+
+function uid() { return Date.now().toString(36) + Math.random().toString(36).slice(2, 7); }
+function topSet(sets) { if (!sets || !sets.length) return null; return sets.reduce((a,b) => b.weight > a.weight ? b : a, sets[0]); }
+function fmtDate(d) { return new Date(d).toLocaleDateString("pl-PL", { day: "2-digit", month: "short" }); }
+function fmtClock(sec) { const m = Math.floor(sec/60), s = sec%60; return `${m}:${s.toString().padStart(2,"0")}`; }
+
+function parseRepRange(str) {
+  const [min, max] = str.split("-").map(Number);
+  return { min, max };
+}
+
+function pickIncrement(max) {
+  if (max <= 8) return 2.5;
+  if (max <= 15) return 2.5;
+  return 1.25;
+}
+
+function suggestNextWeight(pastSets, repTarget) {
+  if (!pastSets || pastSets.length === 0) {
+    return { kind: "start", text: `Brak historii na ten dzień — dobierz ciężar tak, by ostatnie ${repTarget.max} powt. było trudne, w zakresie ${repTarget.min}-${repTarget.max}.` };
+  }
+  const weight = pastSets.reduce((a,b) => Math.max(a,b.weight), 0);
+  const hitTop = pastSets.every(s => s.reps >= repTarget.max);
+  const missedBottom = pastSets.some(s => s.reps < repTarget.min);
+  const inc = pickIncrement(repTarget.max);
+  if (hitTop) {
+    const next = Math.round((weight + inc) * 4) / 4;
+    return { kind: "up", text: `Wyrobiłeś górny zakres (${repTarget.max}+) na wszystkich seriach — dziś spróbuj ${next}kg.`, weight: next };
+  }
+  if (missedBottom) {
+    return { kind: "down", text: `Nie doszedłeś do dołu zakresu (${repTarget.min}) — dziś zostań na ${weight}kg albo zejdź lekko, popraw technikę/odpoczynek.`, weight };
+  }
+  return { kind: "hold", text: `W zakresie, ale nie na maksimum — dziś ten sam ciężar (${weight}kg), celuj w więcej powtórzeń.`, weight };
+}
+
+function SuggestionBadge({ suggestion }) {
+  const style = {
+    up: { bg: "#1a2a1c", color: "#5fbf77", icon: "↑" },
+    down: { bg: "#2a1c1a", color: "#e0a020", icon: "↓" },
+    hold: { bg: "#1a1a18", color: "#8a8a85", icon: "→" },
+    start: { bg: "#1a1a18", color: "#8a8a85", icon: "•" },
+  }[suggestion.kind];
+  return (
+    <div className="flex items-start gap-2 text-[11px] rounded-md px-2.5 py-2 mb-3" style={{ background: style.bg, color: style.color }}>
+      <span className="font-bold">{style.icon}</span>
+      <span>{suggestion.text}</span>
+    </div>
+  );
+}
+
+function EmptyState({ text }) {
+  return (
+    <div className="text-center py-16 border border-dashed border-[#2a2a28] rounded-lg">
+      <div className="text-3xl mb-3 opacity-30">🏋️</div>
+      <div className="text-sm text-[#8a8a85]">{text}</div>
+    </div>
+  );
+}
+
+function Sparkline({ data, color }) {
+  if (data.length < 2) return null;
+  const w = 280, h = 60, pad = 6;
+  const weights = data.map(d => d.weight);
+  const min = Math.min(...weights), max = Math.max(...weights);
+  const range = max - min || 1;
+  const points = data.map((d, i) => {
+    const x = pad + (i / (data.length - 1)) * (w - pad * 2);
+    const y = h - pad - ((d.weight - min) / range) * (h - pad * 2);
+    return `${x},${y}`;
+  });
+  return (
+    <svg viewBox={`0 0 ${w} ${h}`} className="w-full h-16">
+      <polyline points={points.join(" ")} fill="none" stroke={color} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
+      {points.map((p, i) => {
+        const [x, y] = p.split(",");
+        return <circle key={i} cx={x} cy={y} r="2.5" fill={color} />;
+      })}
+    </svg>
+  );
+}
+
+function TrendCard({ t }) {
+  const cfg = {
+    progres: { icon: "📈", color: "#5fbf77", label: "Progres", note: "Idzie w górę — zwiększ ciężar na kolejnej sesji." },
+    plateau: { icon: "➖", color: "#e0a020", label: "Plateau", note: "Ten sam ciężar 2+ sesje. Dodaj powtórzenie albo zmień wariant." },
+    regres: { icon: "📉", color: "#e05252", label: "Regres", note: "Ciężar spadł — sprawdź regenerację, sen, technikę." },
+    "brak-danych": { icon: "➖", color: "#8a8a85", label: "Za mało danych", note: "Potrzeba min. 2 sesji do oceny trendu." },
+  }[t.status];
+  const chartData = t.hist.map(h => ({ date: fmtDate(h.date), weight: h.weight }));
+
+  return (
+    <div className="border border-[#2a2a28] rounded-lg p-4">
+      <div className="flex justify-between items-center mb-2">
+        <div className="font-semibold">{t.name}</div>
+        <div className="flex items-center gap-1.5 text-xs font-medium" style={{ color: cfg.color }}>
+          <span>{cfg.icon}</span> {cfg.label}
+        </div>
+      </div>
+      {t.last && (
+        <div className="text-xs text-[#8a8a85] mb-2">
+          Ostatnio: <span className="text-[#f2f0ea]">{t.last.weight}kg × {t.last.reps}</span>
+        </div>
+      )}
+      {chartData.length >= 2 && (
+        <div className="-ml-1 mb-2">
+          <Sparkline data={chartData} color={cfg.color} />
+        </div>
+      )}
+      <div className="text-[11px] text-[#8a8a85] leading-snug">{cfg.note}</div>
+    </div>
+  );
+}
+
+function RestTimerPanel({ timerTotal, timerLeft, timerRunning, timerLabel, onStart, onToggle, onReset }) {
+  const presets = [45, 60, 90, 120, 150, 180];
+  const pct = timerTotal > 0 ? Math.max(0, timerLeft / timerTotal) : 0;
+  return (
+    <div className="border border-[#2a2a28] rounded-lg p-5">
+      <div className="flex items-center gap-2 mb-4">
+        <span>⏱️</span>
+        <div className="text-xs uppercase tracking-widest text-[#8a8a85]">Timer przerwy</div>
+      </div>
+      <div className="flex items-center justify-center py-4">
+        <div className="relative w-40 h-40">
+          <svg viewBox="0 0 100 100" className="w-full h-full -rotate-90">
+            <circle cx="50" cy="50" r="44" fill="none" stroke="#2a2a28" strokeWidth="6" />
+            <circle cx="50" cy="50" r="44" fill="none" stroke="#ff5a1f" strokeWidth="6" strokeLinecap="round"
+              strokeDasharray={2*Math.PI*44} strokeDashoffset={2*Math.PI*44*(1-pct)} style={{ transition: "stroke-dashoffset 1s linear" }} />
+          </svg>
+          <div className="absolute inset-0 flex flex-col items-center justify-center">
+            <div className="display text-4xl">{fmtClock(Math.max(0, timerLeft))}</div>
+            {timerLabel && <div className="text-[10px] uppercase tracking-widest text-[#8a8a85] mt-1">{timerLabel}</div>}
+          </div>
+        </div>
+      </div>
+      <div className="flex gap-2 mb-4">
+        <button onClick={onToggle} disabled={timerLeft<=0}
+          className="flex-1 py-3 rounded-lg bg-[#ff5a1f] text-[#111110] font-bold uppercase tracking-widest text-xs flex items-center justify-center gap-2 disabled:opacity-30">
+          {timerRunning ? "⏸ Pauza" : "▶ Start"}
+        </button>
+        <button onClick={onReset} className="px-4 py-3 rounded-lg border border-[#2a2a28] text-[#8a8a85]">↺</button>
+      </div>
+      <div className="grid grid-cols-3 gap-2">
+        {presets.map(p => (
+          <button key={p} onClick={() => onStart(p, "")} className="py-2 rounded-lg border border-[#2a2a28] text-xs font-medium text-[#c8c6c0]">{p}s</button>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function FloatingTimer({ timerTotal, timerLeft, timerRunning, timerLabel, onToggle, onReset }) {
+  const pct = timerTotal > 0 ? Math.max(0, timerLeft / timerTotal) : 0;
+  const done = timerLeft <= 0;
+  return (
+    <div className="fixed bottom-4 left-4 right-4 max-w-xl mx-auto z-20">
+      <div className="rounded-xl border px-4 py-3 flex items-center gap-3 shadow-lg" style={{ background: "#1a1a18", borderColor: done ? "#5fbf77" : "#ff5a1f" }}>
+        <div className="relative w-9 h-9 shrink-0">
+          <svg viewBox="0 0 36 36" className="w-full h-full -rotate-90">
+            <circle cx="18" cy="18" r="15" fill="none" stroke="#2a2a28" strokeWidth="4" />
+            <circle cx="18" cy="18" r="15" fill="none" stroke={done ? "#5fbf77" : "#ff5a1f"} strokeWidth="4" strokeLinecap="round"
+              strokeDasharray={2*Math.PI*15} strokeDashoffset={2*Math.PI*15*(1-pct)} />
+          </svg>
+        </div>
+        <div className="flex-1 min-w-0">
+          <div className="display text-xl leading-none">{done ? "GOTOWE" : fmtClock(timerLeft)}</div>
+          {timerLabel && <div className="text-[10px] text-[#8a8a85] truncate">{timerLabel}</div>}
+        </div>
+        <button onClick={onToggle} disabled={done} className="p-2 text-[#f2f0ea] disabled:opacity-30">{timerRunning ? "⏸" : "▶"}</button>
+        <button onClick={onReset} className="p-2 text-[#8a8a85]">✕</button>
+      </div>
+    </div>
+  );
+}
+
+function BestiaTracker() {
+  const [logs, setLogs] = useState(() => loadLogs());
+  const [view, setView] = useState("log");
+  const [selectedDay, setSelectedDay] = useState(1);
+  const [draft, setDraft] = useState({});
+  const [error, setError] = useState("");
+
+  const [timerTotal, setTimerTotal] = useState(90);
+  const [timerLeft, setTimerLeft] = useState(0);
+  const [timerRunning, setTimerRunning] = useState(false);
+  const [timerLabel, setTimerLabel] = useState("");
+
+  useEffect(() => {
+    if (!timerRunning) return;
+    if (timerLeft <= 0) {
+      setTimerRunning(false);
+      try { if (navigator.vibrate) navigator.vibrate([200,100,200]); } catch(e) {}
+      beep();
+      return;
+    }
+    const id = setInterval(() => setTimerLeft(s => s - 1), 1000);
+    return () => clearInterval(id);
+  }, [timerRunning, timerLeft]);
+
+  function beep() {
+    try {
+      const ctx = new (window.AudioContext || window.webkitAudioContext)();
+      const osc = ctx.createOscillator(); const gain = ctx.createGain();
+      osc.connect(gain); gain.connect(ctx.destination);
+      osc.frequency.value = 880; gain.gain.setValueAtTime(0.15, ctx.currentTime);
+      osc.start(); osc.stop(ctx.currentTime + 0.3);
+    } catch(e) {}
+  }
+  function startTimer(seconds, label) { setTimerTotal(seconds); setTimerLeft(seconds); setTimerLabel(label||""); setTimerRunning(true); }
+  function toggleTimer() { if (timerLeft <= 0) return; setTimerRunning(r => !r); }
+  function resetTimer() { setTimerRunning(false); setTimerLeft(timerTotal); }
+
+  useEffect(() => {
+    const day = PLAN[selectedDay];
+    const init = {};
+    day.exercises.forEach(ex => { init[ex.id] = Array.from({length: ex.sets}, () => ({weight:"", reps:""})); });
+    setDraft(init);
+  }, [selectedDay]);
+
+  function persist(next) {
+    const ok = saveLogs(next);
+    if (!ok) { setError("Nie udało się zapisać (pamięć przeglądarki pełna?)."); return; }
+    setLogs(next); setError("");
+  }
+
+  function updateSet(exId, idx, field, value) {
+    setDraft(d => ({ ...d, [exId]: d[exId].map((s,i) => i===idx ? {...s,[field]:value} : s) }));
+  }
+
+  function saveSession() {
+    const entries = Object.entries(draft).map(([exId, sets]) => ({
+      exerciseId: exId, name: EXNAMES[exId],
+      sets: sets.filter(s => s.weight!=="" && s.reps!=="").map(s => ({weight: parseFloat(s.weight), reps: parseInt(s.reps)}))
+    })).filter(e => e.sets.length > 0);
+    if (entries.length === 0) { setError("Wpisz przynajmniej jedną serię."); return; }
+    const session = { id: uid(), date: new Date().toISOString(), day: selectedDay, entries };
+    persist([...logs, session]);
+    setView("history");
+  }
+
+  function deleteSession(id) { persist(logs.filter(l => l.id !== id)); }
+
+  const dayHistory = useMemo(() => {
+    const map = {};
+    [...logs].filter(l => l.day === selectedDay).sort((a,b) => new Date(a.date)-new Date(b.date)).forEach(session => {
+      session.entries.forEach(e => { map[e.exerciseId] = { sets: e.sets, date: session.date }; });
+    });
+    return map;
+  }, [logs, selectedDay]);
+
+  const exerciseHistory = useMemo(() => {
+    const map = {};
+    [...logs].sort((a,b) => new Date(a.date)-new Date(b.date)).forEach(session => {
+      session.entries.forEach(e => {
+        if (!map[e.exerciseId]) map[e.exerciseId] = [];
+        const t = topSet(e.sets);
+        if (t) map[e.exerciseId].push({ date: session.date, weight: t.weight, reps: t.reps, sessionId: session.id });
+      });
+    });
+    return map;
+  }, [logs]);
+
+  const trends = useMemo(() => Object.entries(exerciseHistory).map(([exId, hist]) => {
+    const last3 = hist.slice(-3);
+    let status = "brak-danych";
+    if (last3.length >= 2) {
+      const first = last3[0].weight, last = last3[last3.length-1].weight;
+      status = last > first ? "progres" : last < first ? "regres" : "plateau";
+    }
+    return { exId, name: EXNAMES[exId], hist, status, last: hist[hist.length-1] };
+  }), [exerciseHistory]);
+
+  const streak = useMemo(() => {
+    if (!logs.length) return 0;
+    const sorted = [...logs].sort((a,b) => new Date(b.date)-new Date(a.date));
+    let count = 1;
+    for (let i=0; i<sorted.length-1; i++) {
+      const diff = (new Date(sorted[i].date)-new Date(sorted[i+1].date))/86400000;
+      if (diff <= 4) count++; else break;
+    }
+    return count;
+  }, [logs]);
+
+  const beastLevel = Math.min(99, Math.floor(logs.length * 2.2));
+
+  return (
+    <div className="min-h-screen bg-[#111110] text-[#f2f0ea]" style={{fontFamily:"'Inter', sans-serif"}}>
+      <div className="grain min-h-screen">
+        <div className="border-b border-[#2a2a28] px-5 pt-6 pb-4">
+          <div className="flex items-center justify-between mb-5">
+            <div>
+              <div className="display text-4xl leading-none">BESTIA</div>
+              <div className="text-[10px] uppercase tracking-[0.25em] text-[#8a8a85] mt-1">tracker treningowy</div>
+            </div>
+            <div className="text-right">
+              <div className="flex items-center gap-1.5 justify-end">
+                <span>🔥</span>
+                <span className="display text-2xl text-[#ff5a1f]">{streak}</span>
+              </div>
+              <div className="text-[10px] uppercase tracking-widest text-[#8a8a85]">seria dni</div>
+            </div>
+          </div>
+          <div>
+            <div className="flex justify-between items-baseline mb-1">
+              <span className="text-[10px] uppercase tracking-[0.2em] text-[#8a8a85]">Poziom bestii</span>
+              <span className="text-xs font-bold text-[#ff5a1f]">{beastLevel}%</span>
+            </div>
+            <div className="h-2 rounded-full bg-[#2a2a28] overflow-hidden">
+              <div className="h-full rounded-full transition-all duration-700" style={{ width: `${beastLevel}%`, background: "linear-gradient(90deg, #5fbfb3, #e0a020, #ff5a1f)" }} />
+            </div>
+          </div>
+        </div>
+
+        <div className="flex border-b border-[#2a2a28] px-5">
+          {[{k:"log",label:"Trenuj"},{k:"analiza",label:"Analiza"},{k:"history",label:"Historia"},{k:"tools",label:"Timer"},{k:"info",label:"Info"}].map(t => (
+            <button key={t.k} onClick={() => setView(t.k)}
+              className={`px-4 py-3 text-xs uppercase tracking-widest font-semibold border-b-2 transition-colors ${view===t.k ? "border-[#ff5a1f] text-[#f2f0ea]" : "border-transparent text-[#8a8a85]"}`}>
+              {t.label}
+            </button>
+          ))}
+        </div>
+
+        <div className="p-5 pb-24 max-w-xl mx-auto">
+          {error && (
+            <div className="mb-4 px-3 py-2 bg-[#2a1512] border border-[#ff5a1f]/40 text-[#ff8a5f] text-sm rounded flex justify-between items-center">
+              {error}<button onClick={() => setError("")}>✕</button>
+            </div>
+          )}
+
+          {view === "log" && (
+            <div>
+              <div className="flex gap-2 mb-5">
+                {Object.entries(PLAN).map(([k,d]) => (
+                  <button key={k} onClick={() => setSelectedDay(Number(k))} className="flex-1 rounded-lg px-3 py-2.5 border transition-all"
+                    style={{ borderColor: Number(k)===selectedDay ? d.color : "#2a2a28", background: Number(k)===selectedDay ? `${d.color}15` : "transparent" }}>
+                    <div className="display text-xl" style={{ color: Number(k)===selectedDay ? d.color : "#f2f0ea" }}>DZIEŃ {k}</div>
+                    <div className="text-[10px] uppercase tracking-widest text-[#8a8a85]">{d.label} · {d.sub}</div>
+                  </button>
+                ))}
+              </div>
+              <div className="space-y-4">
+                {PLAN[selectedDay].exercises.map(ex => {
+                  const hist = exerciseHistory[ex.id] || [];
+                  const last = hist[hist.length-1];
+                  return (
+                    <div key={ex.id} className="border border-[#2a2a28] rounded-lg p-4">
+                      <div className="flex justify-between items-baseline mb-3">
+                        <div className="font-semibold">{ex.name}</div>
+                        <button onClick={() => startTimer(PLAN[selectedDay].restSec, ex.name)}
+                          className="flex items-center gap-1 text-[10px] uppercase tracking-widest text-[#8a8a85] border border-[#2a2a28] rounded-full px-2.5 py-1">
+                          ⏱️ {PLAN[selectedDay].restSec}s
+                        </button>
+                      </div>
+                      <div className="text-[10px] uppercase tracking-widest text-[#8a8a85] mb-2">
+                        cel: {ex.reps} powt.{ex.pair && <span className="text-[#ff5a1f]"> · ⚡ superseria z: {ex.pair}</span>}
+                      </div>
+                      <SuggestionBadge suggestion={suggestNextWeight(dayHistory[ex.id]?.sets, parseRepRange(ex.reps))} />
+                      {last && (
+                        <div className="text-[11px] text-[#8a8a85] mb-3">
+                          Ostatnio (dowolny dzień): <span className="text-[#f2f0ea] font-medium">{last.weight}kg × {last.reps}</span> ({fmtDate(last.date)})
+                        </div>
+                      )}
+                      <div className="space-y-2">
+                        {draft[ex.id]?.map((s,i) => (
+                          <div key={i} className="flex items-center gap-2">
+                            <span className="text-[10px] text-[#8a8a85] w-4">{i+1}</span>
+                            <input type="number" inputMode="decimal" placeholder="kg" value={s.weight}
+                              onChange={e => updateSet(ex.id, i, "weight", e.target.value)}
+                              className="flex-1 bg-[#1a1a18] border border-[#2a2a28] rounded px-3 py-2 text-sm focus:outline-none focus:border-[#ff5a1f]" />
+                            <span className="text-[#8a8a85] text-xs">×</span>
+                            <input type="number" inputMode="numeric" placeholder="powt." value={s.reps}
+                              onChange={e => updateSet(ex.id, i, "reps", e.target.value)}
+                              className="flex-1 bg-[#1a1a18] border border-[#2a2a28] rounded px-3 py-2 text-sm focus:outline-none focus:border-[#ff5a1f]" />
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+              <button onClick={saveSession} className="w-full mt-5 py-3.5 rounded-lg bg-[#ff5a1f] text-[#111110] font-bold uppercase tracking-widest text-sm flex items-center justify-center gap-2">
+                ⚡ Zapisz trening
+              </button>
+            </div>
+          )}
+
+          {view === "analiza" && (
+            <div>
+              {trends.length === 0 ? <EmptyState text="Zapisz pierwszy trening, żeby zobaczyć analizę." /> :
+                <div className="space-y-3">{trends.map(t => <TrendCard key={t.exId} t={t} />)}</div>}
+            </div>
+          )}
+
+          {view === "history" && (
+            <div className="space-y-3">
+              {logs.length === 0 ? <EmptyState text="Brak zapisanych treningów." /> :
+                [...logs].sort((a,b) => new Date(b.date)-new Date(a.date)).map(s => (
+                  <div key={s.id} className="border border-[#2a2a28] rounded-lg p-4">
+                    <div className="flex justify-between items-start mb-2">
+                      <div>
+                        <span className="text-[10px] uppercase tracking-widest px-2 py-0.5 rounded" style={{ background: `${PLAN[s.day].color}20`, color: PLAN[s.day].color }}>
+                          Dzień {s.day} · {PLAN[s.day].label}
+                        </span>
+                        <div className="text-xs text-[#8a8a85] mt-1">📅 {fmtDate(s.date)}</div>
+                      </div>
+                      <button onClick={() => deleteSession(s.id)} className="text-[#8a8a85]">🗑</button>
+                    </div>
+                    <div className="space-y-1 mt-2">
+                      {s.entries.map(e => (
+                        <div key={e.exerciseId} className="text-sm flex justify-between">
+                          <span className="text-[#c8c6c0]">{e.name}</span>
+                          <span className="text-[#8a8a85]">{e.sets.map(st => `${st.weight}×${st.reps}`).join(", ")}</span>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                ))}
+            </div>
+          )}
+
+          {view === "tools" && (
+            <div className="space-y-6">
+              <RestTimerPanel timerTotal={timerTotal} timerLeft={timerLeft} timerRunning={timerRunning} timerLabel={timerLabel}
+                onStart={startTimer} onToggle={toggleTimer} onReset={resetTimer} />
+            </div>
+          )}
+
+          {view === "info" && (
+            <div className="space-y-6">
+              <div>
+                <div className="text-xs uppercase tracking-widest text-[#8a8a85] mb-3">Kolory dni treningowych</div>
+                <div className="space-y-2">
+                  {Object.entries(PLAN).map(([k,d]) => (
+                    <div key={k} className="flex items-center gap-3 border border-[#2a2a28] rounded-lg p-3">
+                      <div className="w-3 h-3 rounded-full shrink-0" style={{ background: d.color }} />
+                      <div>
+                        <div className="text-sm font-semibold">Dzień {k} — {d.label}</div>
+                        <div className="text-[11px] text-[#8a8a85]">
+                          {k==="1" && "Ciężko, niskie powtórzenia (6-8) — nacisk na klatę i siłę, superseria na ramionach."}
+                          {k==="2" && "Średnio, umiarkowane powtórzenia (8-12) — nacisk na masę klaty i rąk."}
+                          {k==="3" && "Lekko, wysokie powtórzenia (15-20) — pompa klaty i rąk, superserie."}
+                        </div>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+
+              <div>
+                <div className="text-xs uppercase tracking-widest text-[#8a8a85] mb-3">Sugestia ciężaru (zakładka „Trenuj")</div>
+                <div className="space-y-2">
+                  <div className="flex items-start gap-3 border border-[#2a2a28] rounded-lg p-3">
+                    <div className="w-6 h-6 rounded-full flex items-center justify-center shrink-0 font-bold" style={{ background: "#1a2a1c", color: "#5fbf77" }}>↑</div>
+                    <div>
+                      <div className="text-sm font-semibold" style={{ color: "#5fbf77" }}>Zielony — dołóż ciężar</div>
+                      <div className="text-[11px] text-[#8a8a85]">Wyrobiłeś górny zakres powtórzeń na wszystkich seriach ostatnim razem. Apka proponuje konkretny nowy ciężar.</div>
+                    </div>
+                  </div>
+                  <div className="flex items-start gap-3 border border-[#2a2a28] rounded-lg p-3">
+                    <div className="w-6 h-6 rounded-full flex items-center justify-center shrink-0 font-bold" style={{ background: "#2a1c1a", color: "#e0a020" }}>↓</div>
+                    <div>
+                      <div className="text-sm font-semibold" style={{ color: "#e0a020" }}>Pomarańczowy — zostań / zejdź</div>
+                      <div className="text-[11px] text-[#8a8a85]">Nie doszedłeś do dolnej granicy zakresu powtórzeń. Zostań przy tym samym ciężarze, sprawdź technikę i regenerację.</div>
+                    </div>
+                  </div>
+                  <div className="flex items-start gap-3 border border-[#2a2a28] rounded-lg p-3">
+                    <div className="w-6 h-6 rounded-full flex items-center justify-center shrink-0 font-bold" style={{ background: "#1a1a18", color: "#8a8a85" }}>→</div>
+                    <div>
+                      <div className="text-sm font-semibold" style={{ color: "#c8c6c0" }}>Szary — ten sam ciężar</div>
+                      <div className="text-[11px] text-[#8a8a85]">Jesteś w zakresie powtórzeń, ale nie na maksimum. Zostań przy tym ciężarze i spróbuj zrobić więcej powtórzeń.</div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              <div>
+                <div className="text-xs uppercase tracking-widest text-[#8a8a85] mb-3">Trend (zakładka „Analiza")</div>
+                <div className="space-y-2">
+                  <div className="flex items-start gap-3 border border-[#2a2a28] rounded-lg p-3">
+                    <div className="w-6 h-6 rounded-full flex items-center justify-center shrink-0" style={{ background: "#1a2a1c" }}>📈</div>
+                    <div>
+                      <div className="text-sm font-semibold" style={{ color: "#5fbf77" }}>Progres</div>
+                      <div className="text-[11px] text-[#8a8a85]">Ciężar rośnie na przestrzeni ostatnich sesji tego ćwiczenia.</div>
+                    </div>
+                  </div>
+                  <div className="flex items-start gap-3 border border-[#2a2a28] rounded-lg p-3">
+                    <div className="w-6 h-6 rounded-full flex items-center justify-center shrink-0" style={{ background: "#2a2416" }}>➖</div>
+                    <div>
+                      <div className="text-sm font-semibold" style={{ color: "#e0a020" }}>Plateau</div>
+                      <div className="text-[11px] text-[#8a8a85]">Ten sam ciężar 2+ sesje z rzędu — czas dodać powtórzenie albo zmienić wariant ćwiczenia.</div>
+                    </div>
+                  </div>
+                  <div className="flex items-start gap-3 border border-[#2a2a28] rounded-lg p-3">
+                    <div className="w-6 h-6 rounded-full flex items-center justify-center shrink-0" style={{ background: "#2a1a1a" }}>📉</div>
+                    <div>
+                      <div className="text-sm font-semibold" style={{ color: "#e05252" }}>Regres</div>
+                      <div className="text-[11px] text-[#8a8a85]">Ciężar spadł względem poprzedniej sesji — sprawdź sen, regenerację, stres.</div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              <div>
+                <div className="text-xs uppercase tracking-widest text-[#8a8a85] mb-3">Superseria ⚡</div>
+                <div className="border border-[#2a2a28] rounded-lg p-3 text-[11px] text-[#8a8a85] leading-relaxed">
+                  Dwa ćwiczenia oznaczone jako para (widoczne przy celu powtórzeń w zakładce „Trenuj") robisz **bez przerwy między nimi** — seria A, od razu seria B, dopiero potem właściwy odpoczynek. Oszczędza czas i nie traci efektu na mięśniach, które nie konkurują ze sobą o te same włókna (np. biceps + triceps).
+                </div>
+              </div>
+
+              <div>
+                <div className="text-xs uppercase tracking-widest text-[#8a8a85] mb-3">Poziom Bestii i seria dni</div>
+                <div className="border border-[#2a2a28] rounded-lg p-3 text-[11px] text-[#8a8a85] leading-relaxed">
+                  <div className="mb-2"><span className="text-[#ff5a1f] font-semibold">🔥 Seria dni</span> — ile sesji z rzędu zrobiłeś bez przerwy dłuższej niż 4 dni między nimi.</div>
+                  <div><span className="text-[#ff5a1f] font-semibold">Poziom bestii</span> — rośnie z każdym zapisanym treningiem (czysto motywacyjny licznik, nie wpływa na progresję ciężaru).</div>
+                </div>
+              </div>
+            </div>
+          )}
+        </div>
+
+        {timerLeft > 0 && view !== "tools" && (
+          <FloatingTimer timerTotal={timerTotal} timerLeft={timerLeft} timerRunning={timerRunning} timerLabel={timerLabel} onToggle={toggleTimer} onReset={resetTimer} />
+        )}
+      </div>
+    </div>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById("root")).render(<BestiaTracker />);
+</script>
+</body>
+</html>
